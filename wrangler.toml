@@ -9,15 +9,8 @@ workers_dev = true
 # account_id = "6cab06ca4aac281a97a73d764cd48ce4"
 
 # /count 路由的計數器。namespace 名稱 = "xueshan-usage"(裡面有個 key usage_count)。
-#
-# ⚠️ 只有要改用 `wrangler deploy` 時才需要填下面的 id。目前線上是走 CF dashboard,
-#    這個 repo 純版本控制,id 空著不影響。
-#
-# 取得 namespace id(不是裡面的 key,是 namespace 自己的識別碼,32 位十六進位):
-#   dashboard → Storage & Databases → KV → 列表裡 "xueshan-usage" 那列的 "Namespace ID" 欄
-#   或裝好 wrangler 後:  npx wrangler kv namespace list
 kv_namespaces = [
-  { binding = "USAGE_KV", id = "TODO-僅 wrangler deploy 時需要" }
+  { binding = "USAGE_KV", id = "a5113e89498346b88f990b473a970134" }
 ]
 
 # --- Secrets(不寫在這裡,用指令設定,見 README)---
