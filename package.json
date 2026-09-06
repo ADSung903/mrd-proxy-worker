@@ -1,0 +1,13 @@
+{
+  "name": "mrd-proxy-worker",
+  "private": true,
+  "description": "共用 Cloudflare Worker:MRD AI 分析 proxy + 雪隧選道 TDX/CWA 資料",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
