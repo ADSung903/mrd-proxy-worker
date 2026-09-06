@@ -470,6 +470,13 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // ---- 健康檢查:給 uptime 監控用,不碰任何上游 ----
+    if (url.pathname === '/health') {
+      return new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), {
+        headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...CORS }
+      });
+    }
+
     // ---- 新增:雪隧選道路由,GET 請求,獨立於下面的 MRD 邏輯之外 ----
     if (url.pathname === '/vd') {
       if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
