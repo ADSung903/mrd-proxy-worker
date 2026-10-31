@@ -453,6 +453,84 @@ async function handleVDRequest(request, env) {
   }
 }
 
+// ---------- 回測用:每分鐘把隧道範圍內所有 VD 原始讀值存進 D1 ----------
+// 一分鐘一列(整包 JSON),之後用 scripts/backtest.js 重建「虛擬車」實際通行時間,驗證建議準不準
+// 每個 VD 存成 [vdid, status, dataCollectTime, [[laneId, speed, occupancy, volume, errorType], ...]]
+const LOG_MILE_RANGE = [7.5, 29.5]; // 涵蓋彭山(8.7~11.9K)與雪隧(15.5~28.2K)
+let vdLogSchemaReady = false;
+
+async function logVDSnapshot(env) {
+  if (!env.VD_DB) return;
+  if (!vdLogSchemaReady) {
+    await env.VD_DB.prepare('CREATE TABLE IF NOT EXISTS vd_snap (ts INTEGER PRIMARY KEY, dc TEXT, data TEXT NOT NULL)').run();
+    vdLogSchemaReady = true;
+  }
+  vdCache.fetchedAt = 0; // 排程一律抓新的,不吃 30 秒快取
+  const vds = await getVDData(env);
+  let latest = '';
+  const rows = [];
+  for (const vd of vds) {
+    const m = vd.VDID.match(/-(\d+\.\d+)-/);
+    const mile = m ? parseFloat(m[1]) : null;
+    if (mile === null || mile < LOG_MILE_RANGE[0] || mile > LOG_MILE_RANGE[1]) continue;
+    const lanes = ((vd.LinkFlows && vd.LinkFlows[0] && vd.LinkFlows[0].Lanes) || []).map(l => [
+      l.LaneID, l.Speed, l.Occupancy,
+      (l.Vehicles || []).reduce((s, v) => s + (v.Volume || 0), 0),
+      l.ErrorType && l.ErrorType !== 'diag0' ? l.ErrorType : 0
+    ]);
+    if (vd.DataCollectTime > latest) latest = vd.DataCollectTime;
+    rows.push([vd.VDID, vd.Status, vd.DataCollectTime, lanes]);
+  }
+  if (!rows.length) return;
+  const ts = Math.floor(Date.now() / 60000) * 60;
+  await env.VD_DB.prepare('INSERT OR IGNORE INTO vd_snap (ts, dc, data) VALUES (?, ?, ?)')
+    .bind(ts, latest, JSON.stringify(rows)).run();
+}
+
+async function handleVDLogStatus(env) {
+  const h = { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' };
+  if (!env.VD_DB) return new Response(JSON.stringify({ error: 'VD_DB 尚未綁定' }), { status: 500, headers: h });
+  try {
+    const r = await env.VD_DB.prepare('SELECT COUNT(*) AS n, MIN(ts) AS first, MAX(ts) AS last FROM vd_snap').first();
+    const last = r && r.last ? await env.VD_DB.prepare('SELECT dc, length(data) AS bytes FROM vd_snap WHERE ts = ?').bind(r.last).first() : null;
+    return new Response(JSON.stringify({
+      rows: r.n,
+      first: r.first ? new Date(r.first * 1000).toISOString() : null,
+      last: r.last ? new Date(r.last * 1000).toISOString() : null,
+      lastDataCollectTime: last && last.dc, lastBytes: last && last.bytes
+    }, null, 2), { headers: h });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: h });
+  }
+}
+
+// ---------- 探索用:國道 5 號 CCTV 清單,確認隧道內/附近有哪些鏡頭、串流網址格式 ----------
+async function handleCCTVListRequest(request, env) {
+  const h = { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' };
+  try {
+    const token = await getAccessToken(env);
+    const res = await fetch('https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/CCTV/Freeway?%24format=JSON', {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error('TDX CCTV fetch failed: ' + res.status);
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : (data.CCTVs || []);
+    const n5 = list.filter(c => /N5|國道5|國5/.test((c.CCTVID || '') + (c.RoadName || '') + (c.RoadID || '')));
+    return new Response(JSON.stringify({
+      total: list.length,
+      n5Count: n5.length,
+      sampleRaw: n5[0] || list[0] || null,
+      n5: n5.map(c => ({
+        id: c.CCTVID, road: c.RoadName, dir: c.RoadDirection, mile: c.LocationMile,
+        section: c.RoadSection, stream: c.VideoStreamURL, image: c.VideoImageURL,
+        lat: c.PositionLat, lon: c.PositionLon
+      })).sort((a, b) => String(a.mile).localeCompare(String(b.mile), 'en', { numeric: true }))
+    }, null, 2), { headers: h });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: h });
+  }
+}
+
 // ---------- 原本的 MRD Proxy 相關 ----------
 
 const CORS = {
@@ -467,8 +545,15 @@ const json = (obj, status = 200) =>
   });
 
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(logVDSnapshot(env).catch(e => console.error('vd log failed', e.message)));
+  },
+
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    if (url.pathname === '/vd-log-status') return handleVDLogStatus(env);
+    if (url.pathname === '/cctv-list') return handleCCTVListRequest(request, env);
 
     // ---- 健康檢查:給 uptime 監控用,不碰任何上游 ----
     if (url.pathname === '/health') {

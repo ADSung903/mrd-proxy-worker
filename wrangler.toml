@@ -19,3 +19,12 @@ kv_namespaces = [
 #   TDX_CLIENT_ID       TDX 平台 Client Id
 #   TDX_CLIENT_SECRET   TDX 平台 Client Secret
 #   CWA_API_KEY         中央氣象署開放資料授權碼(/weather 路由)
+
+# 回測用:每分鐘存一次隧道範圍 VD 原始讀值(見 logVDSnapshot)
+[[d1_databases]]
+binding = "VD_DB"
+database_name = "xueshan-vd-log"
+database_id = "afe162d6-111e-4939-9d0a-b7ef5b23e18d"
+
+[triggers]
+crons = ["* * * * *"]
