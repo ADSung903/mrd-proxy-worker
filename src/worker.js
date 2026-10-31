@@ -546,6 +546,46 @@ async function handleCCTVListRequest(request, env) {
   }
 }
 
+// ---------- 前端用:隧道範圍的 CCTV(點路段彈出即時影像) ----------
+// 鏡頭清單幾乎不變,邊緣快取 6 小時,不會每次都打 TDX
+const CCTV_RANGE = { xueshan: [14.5, 29.5], pengshan: [7.5, 13.0] };
+async function handleCCTVRequest(request, env, ctx) {
+  const url = new URL(request.url);
+  const dir = url.searchParams.get('dir') === 'N' ? 'N' : 'S';
+  const tunnelId = CCTV_RANGE[url.searchParams.get('tunnel')] ? url.searchParams.get('tunnel') : 'xueshan';
+  const h = { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': ALLOWED_ORIGIN, 'cache-control': 'public, max-age=21600' };
+  const cacheKey = new Request(`https://cctv-cache.internal/${tunnelId}/${dir}`);
+  const cache = caches.default;
+  const hit = await cache.match(cacheKey);
+  if (hit) {
+    const body = await hit.text();
+    return new Response(body, { headers: h });
+  }
+  try {
+    const token = await getAccessToken(env);
+    const res = await fetch("https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/CCTV/Freeway?%24filter=RoadID%20eq%20'000050'&%24format=JSON", {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error('TDX CCTV fetch failed: ' + res.status);
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : (data.CCTVs || []);
+    const [lo, hi] = CCTV_RANGE[tunnelId];
+    const cams = list
+      .filter(c => c.RoadDirection === dir && c.VideoStreamURL && !/-I-/.test(c.CCTVID || ''))
+      .map(c => {
+        const m = String(c.LocationMile || '').match(/(\d+)K\+(\d+)/);
+        return { id: c.CCTVID, mile: m ? +m[1] + +m[2] / 1000 : null, label: c.LocationMile, stream: c.VideoStreamURL };
+      })
+      .filter(c => c.mile !== null && c.mile >= lo && c.mile <= hi)
+      .sort((a, b) => a.mile - b.mile);
+    const body = JSON.stringify({ tunnel: tunnelId, dir, cams });
+    if (cams.length) ctx.waitUntil(cache.put(cacheKey, new Response(body, { headers: { 'cache-control': 'public, max-age=21600' } })));
+    return new Response(body, { headers: h });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: e.message, cams: [] }), { status: 500, headers: { ...h, 'cache-control': 'no-store' } });
+  }
+}
+
 // ---------- 原本的 MRD Proxy 相關 ----------
 
 const CORS = {
@@ -564,8 +604,13 @@ export default {
     ctx.waitUntil(logVDSnapshot(env).catch(e => console.error('vd log failed', e.message)));
   },
 
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === '/cctv') {
+      if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+      return handleCCTVRequest(request, env, ctx);
+    }
 
     if (url.pathname === '/vd-log-status') return handleVDLogStatus(env);
     if (url.pathname === '/cctv-list') return handleCCTVListRequest(request, env);
