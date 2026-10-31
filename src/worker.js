@@ -132,6 +132,17 @@ async function getAccessToken(env) {
   const now = Date.now();
   if (tokenCache.token && now < tokenCache.expiresAt) return tokenCache.token;
 
+  // 記憶體快取只活在單一 isolate;排程每分鐘可能落在新 isolate,每次都重新要 token 會被 TDX 回 429。
+  // token 效期約一天,存 KV 共用(一天只寫一次)
+  const KV_TOKEN_KEY = 'tdx_token';
+  if (env.USAGE_KV) {
+    const saved = await env.USAGE_KV.get(KV_TOKEN_KEY, 'json').catch(() => null);
+    if (saved && saved.token && now < saved.expiresAt) {
+      tokenCache = saved;
+      return saved.token;
+    }
+  }
+
   const body = new URLSearchParams({
     grant_type: 'client_credentials',
     client_id: env.TDX_CLIENT_ID,
@@ -148,10 +159,13 @@ async function getAccessToken(env) {
   const data = await res.json();
   tokenCache.token = data.access_token;
   tokenCache.expiresAt = now + (data.expires_in - 60) * 1000;
+  if (env.USAGE_KV) {
+    await env.USAGE_KV.put(KV_TOKEN_KEY, JSON.stringify(tokenCache), { expirationTtl: Math.max(60, data.expires_in - 60) }).catch(() => {});
+  }
   return tokenCache.token;
 }
 
-async function getVDData(env) {
+async function getVDData(env, retried) {
   const now = Date.now();
   if (vdCache.data && now - vdCache.fetchedAt < VD_CACHE_TTL_MS) return vdCache.data;
 
@@ -160,9 +174,10 @@ async function getVDData(env) {
     headers: { Authorization: `Bearer ${token}` }
   });
 
-  if (res.status === 401) {
-    tokenCache.token = null;
-    return getVDData(env);
+  if (res.status === 401 && !retried) {
+    tokenCache = { token: null, expiresAt: 0 };
+    if (env.USAGE_KV) await env.USAGE_KV.delete('tdx_token').catch(() => {});
+    return getVDData(env, true);
   }
   if (!res.ok) throw new Error('TDX VD fetch failed: ' + res.status);
 
